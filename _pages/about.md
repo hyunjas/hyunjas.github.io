@@ -11,6 +11,7 @@ profile:
   more_info: >
     <p>University of California, Irvine</p>
     <p>Irvine, CA, USA</p>
+    <p>hyunjas@uci.edu</p>
 
 news: false # includes a list of news items
 selected_papers: false # includes a list of papers marked as "selected={true}"
