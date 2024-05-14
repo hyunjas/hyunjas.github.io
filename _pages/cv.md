@@ -5,7 +5,7 @@ title: cv
 nav: true
 nav_order: 5
 cv_pdf: CV_Hyunjae_Suh.pdf
-description: 
+description: Check out my CV here.
 toc:
   sidebar: left
 ---
