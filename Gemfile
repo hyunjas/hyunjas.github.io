@@ -26,3 +26,14 @@ group :other_plugins do
     gem 'feedjira'
     gem 'httparty'
 end
+# Formerly-default gems removed from the standard library in Ruby 3.4+/4.0.
+# Required by transitive dependencies (e.g. citeproc-ruby uses `observer`).
+# Harmless on the CI's Ruby 3.2.2, where these are still bundled.
+group :stdlib_shims do
+    gem 'base64'
+    gem 'bigdecimal'
+    gem 'csv'
+    gem 'logger'
+    gem 'observer'
+    gem 'ostruct'
+end
