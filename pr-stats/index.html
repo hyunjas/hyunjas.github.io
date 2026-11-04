@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub PR Stats</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085;
+    --border: #e3e6ec; --accent: #2f6feb; --good: #1a7f37; --bad: #cf222e; --warn: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --card: #171b23; --text: #e6e9ef; --muted: #8b93a3;
+      --border: #2a303c; --accent: #4c8dff; --good: #3fb950; --bad: #f85149; --warn: #d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { margin: 0 0 4px; font-size: 26px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  input { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+          background: var(--card); color: var(--text); font: inherit; }
+  #username { flex: 1 1 220px; }
+  button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent);
+           color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: wait; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  #status { min-height: 22px; margin-bottom: 16px; color: var(--muted); }
+  #status.error { color: var(--bad); }
+  .years { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .card h2 { margin: 0 0 16px; font-size: 20px; }
+  .card h2 small { color: var(--muted); font-weight: 400; font-size: 13px; }
+  .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .delta { font-size: 12px; margin-left: 6px; }
+  details { margin-top: 24px; }
+  summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+  .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--card); }
+  td.title { white-space: normal; min-width: 260px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .merged { color: #8250df; } .closed { color: var(--bad); } .open { color: var(--good); }
+</style>
+</head>
+<body>
+<main>
+  <h1>GitHub PR Stats</h1>
+  <p class="sub">Pull requests authored by a user: last year vs. this year, with time to resolve each one.</p>
+
+  <form id="form">
+    <input id="username" placeholder="GitHub username, e.g. torvalds" required autocomplete="off">
+    <button id="go" type="submit">Analyze</button>
+  </form>
+  <p class="hint">
+    Uses GitHub's public API: only public PRs are counted, and GitHub allows ~10 searches/minute, so very active users may take a moment.
+  </p>
+
+  <div id="status"></div>
+  <div id="results"></div>
+</main>
+
+<script>
+const API = "https://api.github.com";
+const $ = (id) => document.getElementById(id);
+
+// ---------- GitHub fetching ----------
+
+async function gh(path) {
+  const headers = { Accept: "application/vnd.github+json" };
+  for (;;) {
+    const res = await fetch(API + path, { headers });
+    if (res.ok) return res.json();
+    // Secondary / search rate limit: wait until reset and retry.
+    if ((res.status === 403 || res.status === 429) && res.headers.get("x-ratelimit-remaining") === "0") {
+      const reset = Number(res.headers.get("x-ratelimit-reset")) * 1000;
+      const waitMs = Math.max(1000, reset - Date.now() + 1000);
+      setStatus(`Rate limited by GitHub, waiting ${Math.ceil(waitMs / 1000)}s…`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message || `GitHub API error ${res.status}`);
+  }
+}
+
+// The search API caps results at 1000 per query, so if a range has more,
+// split it in half and search each half.
+async function searchPRs(user, from, to, onProgress) {
+  const q = encodeURIComponent(`type:pr author:${user} created:${from}..${to}`);
+  const first = await gh(`/search/issues?q=${q}&per_page=100&page=1`);
+  if (first.total_count > 1000 && from !== to) {
+    const mid = midDate(from, to);
+    const a = await searchPRs(user, from, mid, onProgress);
+    const b = await searchPRs(user, nextDay(mid), to, onProgress);
+    return a.concat(b);
+  }
+  let items = first.items;
+  onProgress(items.length);
+  const pages = Math.ceil(Math.min(first.total_count, 1000) / 100);
+  for (let p = 2; p <= pages; p++) {
+    const page = await gh(`/search/issues?q=${q}&per_page=100&page=${p}`);
+    items = items.concat(page.items);
+    onProgress(page.items.length);
+  }
+  return items;
+}
+
+function midDate(from, to) {
+  const a = Date.parse(from), b = Date.parse(to);
+  return new Date(a + Math.floor((b - a) / 2 / 864e5) * 864e5).toISOString().slice(0, 10);
+}
+function nextDay(d) {
+  return new Date(Date.parse(d) + 864e5).toISOString().slice(0, 10);
+}
+
+// ---------- Stats ----------
+
+function toPR(item) {
+  const created = new Date(item.created_at);
+  const mergedAt = item.pull_request?.merged_at ? new Date(item.pull_request.merged_at) : null;
+  const closedAt = item.closed_at ? new Date(item.closed_at) : null;
+  const state = mergedAt ? "merged" : item.state === "closed" ? "closed" : "open";
+  const resolvedAt = mergedAt || closedAt;
+  return {
+    title: item.title,
+    url: item.html_url,
+    repo: item.repository_url.replace(`${API}/repos/`, ""),
+    number: item.number,
+    created,
+    resolvedAt,
+    state,
+    hours: resolvedAt ? (resolvedAt - created) / 36e5 : null,
+  };
+}
+
+function median(arr) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+const mean = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
+
+function summarize(prs) {
+  const merged = prs.filter((p) => p.state === "merged");
+  const closed = prs.filter((p) => p.state === "closed");
+  const open = prs.filter((p) => p.state === "open");
+  const mergeHours = merged.map((p) => p.hours);
+  const resolveHours = prs.filter((p) => p.hours != null).map((p) => p.hours);
+  return {
+    total: prs.length,
+    merged: merged.length,
+    closed: closed.length,
+    open: open.length,
+    mergeRate: prs.length ? merged.length / (merged.length + closed.length || 1) : null,
+    medianMerge: median(mergeHours),
+    avgMerge: mean(mergeHours),
+    medianResolve: median(resolveHours),
+    repos: new Set(prs.map((p) => p.repo)).size,
+  };
+}
+
+// ---------- Rendering ----------
+
+function fmtDuration(h) {
+  if (h == null) return "—";
+  if (h < 1) return `${Math.round(h * 60)}m`;
+  if (h < 48) return `${h.toFixed(1)}h`;
+  return `${(h / 24).toFixed(1)}d`;
+}
+const fmtDate = (d) => (d ? d.toISOString().slice(0, 10) : "—");
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function delta(cur, prev, lowerIsBetter = false) {
+  if (cur == null || prev == null || prev === 0) return "";
+  const pct = ((cur - prev) / prev) * 100;
+  if (Math.abs(pct) < 0.5) return "";
+  const better = lowerIsBetter ? pct < 0 : pct > 0;
+  return `<span class="delta" style="color:var(${better ? "--good" : "--bad"})">${pct > 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(0)}%</span>`;
+}
+
+function yearCard(label, sub, s, prev) {
+  const stat = (name, value, d = "") => `<div class="stat"><div class="label">${name}</div><div class="value">${value}${d}</div></div>`;
+  return `<div class="card">
+    <h2>${label} <small>${sub}</small></h2>
+    <div class="stats">
+      ${stat("Total PRs", s.total, prev ? delta(s.total, prev.total) : "")}
+      ${stat("Merged", s.merged, prev ? delta(s.merged, prev.merged) : "")}
+      ${stat("Closed (not merged)", s.closed)}
+      ${stat("Still open", s.open)}
+      ${stat("Median time to merge", fmtDuration(s.medianMerge), prev ? delta(s.medianMerge, prev.medianMerge, true) : "")}
+      ${stat("Average time to merge", fmtDuration(s.avgMerge), prev ? delta(s.avgMerge, prev.avgMerge, true) : "")}
+      ${stat("Median time to resolve", fmtDuration(s.medianResolve))}
+      ${stat("Merge rate", s.mergeRate == null ? "—" : `${Math.round(s.mergeRate * 100)}%`)}
+      ${stat("Repositories", s.repos)}
+    </div>
+  </div>`;
+}
+
+const COLS = [
+  { key: "repo", label: "Repo" },
+  { key: "title", label: "Title" },
+  { key: "state", label: "State" },
+  { key: "created", label: "Opened" },
+  { key: "resolvedAt", label: "Merged / closed" },
+  { key: "hours", label: "Time to resolve", num: true },
+];
+
+function prTable(id, prs) {
+  const rows = prs.map((p) => `<tr>
+    <td>${esc(p.repo)}</td>
+    <td class="title"><a href="${p.url}" target="_blank" rel="noopener">#${p.number} ${esc(p.title)}</a></td>
+    <td><span class="pill ${p.state}">${p.state}</span></td>
+    <td>${fmtDate(p.created)}</td>
+    <td>${fmtDate(p.resolvedAt)}</td>
+    <td class="num">${fmtDuration(p.hours)}</td>
+  </tr>`).join("");
+  return `<div class="table-wrap"><table data-id="${id}">
+    <thead><tr>${COLS.map((c, i) => `<th data-col="${i}">${c.label}</th>`).join("")}</tr></thead>
+    <tbody>${rows || `<tr><td colspan="6">No pull requests.</td></tr>`}</tbody>
+  </table></div>`;
+}
+
+const tables = {};
+function wireSorting() {
+  document.querySelectorAll("table[data-id]").forEach((table) => {
+    const id = table.dataset.id;
+    let dir = {};
+    table.querySelectorAll("th").forEach((th) => {
+      th.onclick = () => {
+        const col = COLS[th.dataset.col];
+        dir[col.key] = -(dir[col.key] || -1);
+        const d = dir[col.key];
+        tables[id].sort((a, b) => {
+          const x = a[col.key], y = b[col.key];
+          if (x == null) return 1;
+          if (y == null) return -1;
+          return (x > y ? 1 : x < y ? -1 : 0) * d;
+        });
+        table.parentElement.outerHTML = prTable(id, tables[id]);
+        wireSorting();
+      };
+    });
+  });
+}
+
+function setStatus(msg, isError = false) {
+  $("status").textContent = msg;
+  $("status").className = isError ? "error" : "";
+}
+
+// ---------- Main ----------
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const user = $("username").value.trim().replace(/^@/, "");
+  if (!user) return;
+
+  $("go").disabled = true;
+  $("results").innerHTML = "";
+  const now = new Date();
+  const thisYear = now.getUTCFullYear();
+  const lastYear = thisYear - 1;
+  const today = now.toISOString().slice(0, 10);
+
+  try {
+    setStatus(`Looking up ${user}…`);
+    const profile = await gh(`/users/${encodeURIComponent(user)}`);
+
+    let fetched = 0;
+    const progress = (n) => { fetched += n; setStatus(`Fetched ${fetched} PRs…`); };
+    const lastItems = await searchPRs(profile.login, `${lastYear}-01-01`, `${lastYear}-12-31`, progress);
+    const thisItems = await searchPRs(profile.login, `${thisYear}-01-01`, today, progress);
+
+    const lastPRs = lastItems.map(toPR).sort((a, b) => b.created - a.created);
+    const thisPRs = thisItems.map(toPR).sort((a, b) => b.created - a.created);
+    tables.last = lastPRs;
+    tables.this = thisPRs;
+    const sLast = summarize(lastPRs);
+    const sThis = summarize(thisPRs);
+
+    $("results").innerHTML = `
+      <p><a href="${profile.html_url}" target="_blank" rel="noopener"><strong>${esc(profile.login)}</strong></a>
+        ${profile.name ? `· ${esc(profile.name)}` : ""}</p>
+      <div class="years">
+        ${yearCard(lastYear, "full year", sLast)}
+        ${yearCard(thisYear, `Jan 1 – ${today}`, sThis, sLast)}
+      </div>
+      <details open><summary>${thisYear} pull requests (${thisPRs.length})</summary>${prTable("this", thisPRs)}</details>
+      <details><summary>${lastYear} pull requests (${lastPRs.length})</summary>${prTable("last", lastPRs)}</details>
+    `;
+    wireSorting();
+    setStatus(`Done. Time to resolve = opened → merged (or closed, if not merged). Click column headers to sort.`);
+  } catch (err) {
+    setStatus(err.message === "Not Found" ? `User "${user}" not found.` : err.message, true);
+  } finally {
+    $("go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
