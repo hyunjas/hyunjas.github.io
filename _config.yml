@@ -264,7 +264,7 @@ sass:
 # -----------------------------------------------------------------------------
 
 jekyll-minifier:
-  exclude: ["robots.txt"]
+  exclude: ["robots.txt", "pr-stats/index.html"]
   uglifier_args:
     harmony: true
 
