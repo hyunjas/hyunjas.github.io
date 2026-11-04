@@ -25,7 +25,6 @@
   input { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
           background: var(--card); color: var(--text); font: inherit; }
   #username { flex: 1 1 220px; }
-  #token { flex: 1 1 280px; }
   button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent);
            color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .6; cursor: wait; }
@@ -61,12 +60,10 @@
 
   <form id="form">
     <input id="username" placeholder="GitHub username, e.g. torvalds" required autocomplete="off">
-    <input id="token" type="password" placeholder="Personal access token (optional)" autocomplete="off">
     <button id="go" type="submit">Analyze</button>
   </form>
   <p class="hint">
-    Without a token GitHub allows ~10 search requests/minute and only public PRs. A token (no scopes needed for public data)
-    raises that to 30/minute. It is stored only in this browser's localStorage.
+    Uses GitHub's public API: only public PRs are counted, and GitHub allows ~10 searches/minute, so very active users may take a moment.
   </p>
 
   <div id="status"></div>
@@ -77,13 +74,10 @@
 const API = "https://api.github.com";
 const $ = (id) => document.getElementById(id);
 
-try { $("token").value = localStorage.getItem("gh_pr_stats_token") || ""; } catch {}
-
 // ---------- GitHub fetching ----------
 
-async function gh(path, token) {
+async function gh(path) {
   const headers = { Accept: "application/vnd.github+json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
   for (;;) {
     const res = await fetch(API + path, { headers });
     if (res.ok) return res.json();
@@ -102,20 +96,20 @@ async function gh(path, token) {
 
 // The search API caps results at 1000 per query, so if a range has more,
 // split it in half and search each half.
-async function searchPRs(user, from, to, token, onProgress) {
+async function searchPRs(user, from, to, onProgress) {
   const q = encodeURIComponent(`type:pr author:${user} created:${from}..${to}`);
-  const first = await gh(`/search/issues?q=${q}&per_page=100&page=1`, token);
+  const first = await gh(`/search/issues?q=${q}&per_page=100&page=1`);
   if (first.total_count > 1000 && from !== to) {
     const mid = midDate(from, to);
-    const a = await searchPRs(user, from, mid, token, onProgress);
-    const b = await searchPRs(user, nextDay(mid), to, token, onProgress);
+    const a = await searchPRs(user, from, mid, onProgress);
+    const b = await searchPRs(user, nextDay(mid), to, onProgress);
     return a.concat(b);
   }
   let items = first.items;
   onProgress(items.length);
   const pages = Math.ceil(Math.min(first.total_count, 1000) / 100);
   for (let p = 2; p <= pages; p++) {
-    const page = await gh(`/search/issues?q=${q}&per_page=100&page=${p}`, token);
+    const page = await gh(`/search/issues?q=${q}&per_page=100&page=${p}`);
     items = items.concat(page.items);
     onProgress(page.items.length);
   }
@@ -271,8 +265,6 @@ function setStatus(msg, isError = false) {
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const user = $("username").value.trim().replace(/^@/, "");
-  const token = $("token").value.trim();
-  try { token ? localStorage.setItem("gh_pr_stats_token", token) : localStorage.removeItem("gh_pr_stats_token"); } catch {}
   if (!user) return;
 
   $("go").disabled = true;
@@ -284,12 +276,12 @@ $("form").addEventListener("submit", async (e) => {
 
   try {
     setStatus(`Looking up ${user}…`);
-    const profile = await gh(`/users/${encodeURIComponent(user)}`, token);
+    const profile = await gh(`/users/${encodeURIComponent(user)}`);
 
     let fetched = 0;
     const progress = (n) => { fetched += n; setStatus(`Fetched ${fetched} PRs…`); };
-    const lastItems = await searchPRs(profile.login, `${lastYear}-01-01`, `${lastYear}-12-31`, token, progress);
-    const thisItems = await searchPRs(profile.login, `${thisYear}-01-01`, today, token, progress);
+    const lastItems = await searchPRs(profile.login, `${lastYear}-01-01`, `${lastYear}-12-31`, progress);
+    const thisItems = await searchPRs(profile.login, `${thisYear}-01-01`, today, progress);
 
     const lastPRs = lastItems.map(toPR).sort((a, b) => b.created - a.created);
     const thisPRs = thisItems.map(toPR).sort((a, b) => b.created - a.created);
